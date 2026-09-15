@@ -10,6 +10,8 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
 <!-- SheetJS para leer/escribir Excel -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<!-- ExcelJS para escritura con estilos (bordes, colores) -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.4.0/exceljs.min.js"></script>
 <!-- Fuentes corporativas -->
 <link href="https://fonts.googleapis.com/css2?family=Nunito+Sans:wght@300;400;600;700&family=Nunito:wght@400;600;700;800&display=swap" rel="stylesheet"/>
 <style>
@@ -28,17 +30,113 @@
 <script type="text/babel">
 const { useState, useCallback } = React;
 
-// ─── FESTIVOS COLOMBIA 2026 ──────────────────────────────────────────────────
-const FESTIVOS = new Set([
-  "2026-01-01","2026-01-12","2026-03-23","2026-04-02","2026-04-03",
-  "2026-05-01","2026-05-18","2026-06-08","2026-06-15","2026-06-29",
-  "2026-07-20","2026-08-07","2026-08-17","2026-10-12","2026-11-02",
-  "2026-11-16","2026-12-08","2026-12-25",
-]);
-function esFestivo(f){return FESTIVOS.has(f.toISOString().split("T")[0]);}
+// ─── FESTIVOS COLOMBIA (calculados, válidos para cualquier año) ────────────
+// En vez de una lista fija (que quedaría corta cada año), se calculan con el
+// algoritmo de Pascua (Meeus/Jones/Butcher) + las reglas colombianas:
+// - Fijos: Año Nuevo, Trabajo, Independencia, Batalla de Boyacá, Inmaculada,
+//   Navidad.
+// - Basados en Pascua (no se trasladan): Jueves y Viernes Santo.
+// - Ley Emiliani (se trasladan al lunes siguiente si no caen en lunes):
+//   Reyes Magos, San José, Ascensión, Corpus Christi, Sagrado Corazón,
+//   San Pedro y San Pablo, Asunción, Día de la Raza, Todos los Santos,
+//   Independencia de Cartagena.
+// Se cachea por año para no recalcular en cada consulta.
+function pascua(anio){
+  // Algoritmo de Gauss/Meeus para el domingo de Pascua (calendario gregoriano)
+  const a=anio%19,b=Math.floor(anio/100),c=anio%100;
+  const d=Math.floor(b/4),e=b%4,f=Math.floor((b+8)/25),g=Math.floor((b-f+1)/3);
+  const h=(19*a+b-d-g+15)%30;
+  const i=Math.floor(c/4),k=c%4;
+  const l=(32+2*e+2*i-h-k)%7;
+  const m=Math.floor((a+11*h+22*l)/451);
+  const mes=Math.floor((h+l-7*m+114)/31); // 3=marzo, 4=abril
+  const dia=((h+l-7*m+114)%31)+1;
+  return new Date(anio,mes-1,dia);
+}
+function sumarDias(fecha,n){const d=new Date(fecha);d.setDate(d.getDate()+n);return d;}
+function siguienteLunes(fecha){
+  const d=new Date(fecha);
+  const dow=d.getDay(); // 0=domingo,1=lunes,...
+  const add=dow===1?0:((8-dow)%7);
+  d.setDate(d.getDate()+add);
+  return d;
+}
+// Clave YYYY-MM-DD en hora LOCAL (evita el desfase de toISOString con la zona horaria)
+function fkey(f){
+  const y=f.getFullYear(),m=String(f.getMonth()+1).padStart(2,"0"),d=String(f.getDate()).padStart(2,"0");
+  return `${y}-${m}-${d}`;
+}
+const _festivosCache={};
+function festivosDelAnio(anio){
+  if(_festivosCache[anio])return _festivosCache[anio];
+  const pas=pascua(anio);
+  const lista=[
+    new Date(anio,0,1),                     // Año Nuevo
+    siguienteLunes(new Date(anio,0,6)),      // Reyes Magos
+    siguienteLunes(new Date(anio,2,19)),     // San José
+    sumarDias(pas,-3),                       // Jueves Santo
+    sumarDias(pas,-2),                       // Viernes Santo
+    new Date(anio,4,1),                      // Día del Trabajo
+    sumarDias(pas,43),                       // Ascensión del Señor
+    sumarDias(pas,64),                       // Corpus Christi
+    sumarDias(pas,71),                       // Sagrado Corazón
+    siguienteLunes(new Date(anio,5,29)),     // San Pedro y San Pablo
+    new Date(anio,6,20),                     // Independencia
+    new Date(anio,7,7),                      // Batalla de Boyacá
+    siguienteLunes(new Date(anio,7,15)),     // Asunción de la Virgen
+    siguienteLunes(new Date(anio,9,12)),     // Día de la Raza
+    siguienteLunes(new Date(anio,10,1)),     // Todos los Santos
+    siguienteLunes(new Date(anio,10,11)),    // Independencia de Cartagena
+    new Date(anio,11,8),                     // Inmaculada Concepción
+    new Date(anio,11,25),                    // Navidad
+  ];
+  const set=new Set(lista.map(fkey));
+  _festivosCache[anio]=set;
+  return set;
+}
+function esFestivo(f){return festivosDelAnio(f.getFullYear()).has(fkey(f));}
 function esDomingo(f){return f.getDay()===0;}
 function esFestDom(f){return esDomingo(f)||esFestivo(f);}
 function esNocturno(h){return h>=19||h<6;}
+// Jornada ordinaria diaria vigente (Ley 2466 de 2025): 8h hasta el 15-jul-2026
+// (44h/semana), 7h desde el 16-jul-2026 (42h/semana). Se evalúa por fecha.
+const CORTE_7H = new Date(2026,6,16); // 16-jul-2026 (mes 6 = julio, base 0)
+function jornadaOrdinaria(fecha){ return fecha>=CORTE_7H ? 7 : 8; }
+
+// ─── CUMPLIMIENTO SEMANAL (42h/44h) ─────────────────────────────────────────
+// Si en una semana calendario (lunes-domingo) el colaborador no excede el
+// tope legal semanal, ninguna hora de esa semana se clasifica como extra:
+// solo aplican recargos (nocturno/dominical/festivo). El tope diario de 7h/8h
+// solo entra a regir cuando la semana completa excede el tope semanal.
+function topeSemanal(fecha){ return fecha>=CORTE_7H ? 42 : 44; }
+function inicioSemana(fecha){
+  const d=new Date(fecha.getFullYear(),fecha.getMonth(),fecha.getDate());
+  const dow=(d.getDay()+6)%7; // lunes=0 ... domingo=6
+  d.setDate(d.getDate()-dow);
+  return d.getTime();
+}
+
+// Recorre los días ya parseados de un colaborador y determina, por cada
+// semana calendario, si el acumulado de horas trabajadas cabe dentro del
+// tope semanal. Devuelve un mapa {inicioSemana(ms): capOverride}, donde
+// capOverride=Infinity significa "esa semana no genera horas extra".
+function calcularCapsSemanales(dias){
+  const acumulado={}; // weekKey -> {horas, fechaRef}
+  for(const dia of dias){
+    const{segs}=parseTurno(dia.turno);
+    if(!segs||!segs.length)continue;
+    let td=0;for(const s of segs)td+=s.fin-s.ini;
+    const wk=inicioSemana(dia.fecha);
+    if(!acumulado[wk])acumulado[wk]={horas:0,fechaRef:dia.fecha};
+    acumulado[wk].horas+=td;
+  }
+  const caps={};
+  for(const wk in acumulado){
+    const{horas,fechaRef}=acumulado[wk];
+    caps[wk]=(horas<=topeSemanal(fechaRef))?Infinity:undefined;
+  }
+  return caps;
+}
 
 function parseHora(t){
   t=t.trim().toUpperCase();
@@ -49,30 +147,95 @@ function parseHora(t){
   return h;
 }
 
-function parseTurno(texto){
-  if(!texto)return null;
-  const t=texto.toString().trim().toUpperCase();
-  const ig=["DESCANSO","VACACIONES","DIA DE LA FAMILIA","D/DAS","SAC-MARAYA",
-    "COLINAS DE PAZ","P-OFRENDA","JURADO DE VOTACION","CUBA","CALL CENTER"];
-  for(const x of ig)if(t.includes(x))return null;
-  const horas=t.split("-").map(parseHora).filter(h=>h!==null);
-  if(!horas.length)return null;
-  const segs=[];
-  if(horas.length===2){let[a,b]=horas;if(b<=a)b+=24;segs.push({ini:a,fin:b});}
-  else if(horas.length===3){let[a,b,c]=horas;if(b<=a)b+=24;if(c<=a)c+=24;if(c<b)c+=24;segs.push({ini:a,fin:c});}
-  else if(horas.length===4){let[a,b,c,d]=horas;if(b<=a)b+=24;if(c<a)c+=24;if(d<=c)d+=24;segs.push({ini:a,fin:b});segs.push({ini:c,fin:d});}
-  return segs.length?segs:null;
+const IGNORAR_KW=["DESCANSO","VACACIONES","DIA DE LA FAMILIA","D/DAS","SAC-MARAYA",
+  "SAC-MARAY","COLINAS DE PAZ","P-OFRENDA","JURADO DE VOTACION","CUBA","CALL CENTER",
+  "COMPENSATORIO","INCAPACIDAD","SEMINARIO","INDUCCION","OF PRINCIPAL","LICENCIA","SUSPENSION"];
+
+// Extrae las marcas horarias (AM/PM) de un texto y devuelve también el texto
+// remanente (código/nota) — así una celda híbrida como "8AM-4PMCUBA" o
+// "7AM-2PM-D/DAS" se reconoce como turno trabajado con nota adjunta, en vez
+// de descartarse por completo.
+function extraerTokens(t){
+  const tokens=t.match(/\d{1,2}(?:AM|PM)/g)||[];
+  let resto=t.replace(/\d{1,2}(?:AM|PM)/g,"");
+  resto=resto.replace(/^[\s\-/]+|[\s\-/]+$/g,"").replace(/[\s\-/]{2,}/g," ").trim();
+  return{tokens,resto};
 }
 
-function clasificar(segs,fecha){
-  const fd=esFestDom(fecha);
+// Devuelve {segs, nota} — segs es null si el turno es ambiguo/no reconocido
+// (para reportarlo en el log en vez de descartarlo en silencio), [] si es un
+// día no laborado, o una lista de segmentos {ini, fin, extra} donde "extra"
+// marca un tramo de hora extra FORZADA (formato de 3 marcas horarias).
+function parseTurno(texto){
+  if(!texto)return{segs:[],nota:""};
+  const t=texto.toString().trim().toUpperCase();
+  const{tokens,resto}=extraerTokens(t);
+
+  if(!tokens.length){
+    for(const kw of IGNORAR_KW)if(t.includes(kw))return{segs:[],nota:""};
+    return{segs:null,nota:t}; // ambiguo: no es horario ni palabra clave conocida
+  }
+
+  const horas=tokens.map(parseHora).filter(h=>h!==null);
+  if(horas.length<2)return{segs:null,nota:t};
+
+  const segs=[];
+  if(horas.length===2){
+    let[a,b]=horas;if(b<=a)b+=24;
+    const dur=b-a;
+    // Descuento automatico de 1h de almuerzo: un turno escrito como un solo
+    // bloque continuo (no el formato de doble turno con "/") que dura 8h o
+    // mas y ATRAVIESA por completo el rango de mediodia (12m-2pm) -sin
+    // iniciar ni terminar dentro de ese lapso- se asume con 1h de almuerzo
+    // no trabajada. Por eso "6AM-3PM" (9h brutas, cruza 12-2 de lado a lado)
+    // descuenta 1h, pero "6AM-2PM" o "12PM-6PM" NO descuentan, porque
+    // inician o terminan justo en el borde del almuerzo.
+    if(dur>=8&&a<12&&b>14){
+      segs.push({ini:a,fin:12,extra:false});
+      segs.push({ini:13,fin:b,extra:false});
+    }else{
+      segs.push({ini:a,fin:b,extra:false});
+    }
+  }else if(horas.length===3){
+    // 3 marcas: el tramo final es hora extra forzada (lo anota el
+    // administrador de la regional), sin importar el acumulado de jornada.
+    let[a,b,c]=horas;
+    if(b<=a)b+=24;
+    if(c<=b)c+=24;
+    segs.push({ini:a,fin:b,extra:false});
+    segs.push({ini:b,fin:c,extra:true});
+  }else if(horas.length===4){
+    let[a,b,c,d]=horas;
+    if(b<=a)b+=24;
+    if(c<a)c+=24;
+    if(d<=c)d+=24;
+    segs.push({ini:a,fin:b,extra:false});
+    segs.push({ini:c,fin:d,extra:false});
+  }
+  return{segs,nota:resto};
+}
+
+// IMPORTANTE: la condición festivo/domingo se evalúa POR CADA media hora
+// según la fecha calendario real que le corresponde (fecha base + los días
+// que el turno ya haya cruzado), no una sola vez para todo el turno. Esto es
+// crítico en turnos nocturnos que cruzan la medianoche: p.ej. un turno que
+// empieza domingo 10PM y termina lunes 6AM, donde el lunes es festivo — las
+// horas después de medianoche deben evaluarse como festivas (lunes), no
+// heredar el domingo del inicio; o al revés, un turno que empieza sábado
+// (ordinario) y cruza a domingo (dominical) a partir de la medianoche.
+function clasificar(segs,fecha,capOverride){
+  const CAP=(capOverride!==undefined)?capOverride:jornadaOrdinaria(fecha);
   const r={DOMINICAL:0,"REC. NOCT. FEST":0,"REC. NOCT":0,"H.E.D":0,"H.E.N":0,"H.E.F.D":0,"H.E.F.N":0};
   let ord=0;
   for(const seg of segs){
     let c=seg.ini;
     while(c<seg.fin){
       const nx=Math.min(c+0.5,seg.fin);const fr=nx-c;
-      const noc=esNocturno(c%24);const ex=ord>=8;
+      const diasCruzados=Math.floor(c/24);
+      const fechaHora=diasCruzados===0?fecha:sumarDias(fecha,diasCruzados);
+      const fd=esFestDom(fechaHora);
+      const horaDia=((c%24)+24)%24;
+      const noc=esNocturno(horaDia);const ex=seg.extra||ord>=CAP;
       if(!ex){
         if(fd){if(noc)r["REC. NOCT. FEST"]+=fr;else r["DOMINICAL"]+=fr;}
         else if(noc)r["REC. NOCT"]+=fr;
@@ -86,6 +249,62 @@ function clasificar(segs,fecha){
   }
   for(const k of Object.keys(r))r[k]=Math.round(r[k]*100)/100;
   return r;
+}
+
+// ─── PERSONAL DE MANEJO Y CONFIANZA ──────────────────────────────────────────
+// 'NA' (default): se calcula normal. 'MC': no gana recargos ni horas extra
+// bajo ninguna circunstancia. 'MC2D': igual que MC, salvo hasta 2 domingos
+// autorizados por mes calendario, en los que sí se calculan sus recargos/extras.
+function zeroCats(){
+  return{DOMINICAL:0,"REC. NOCT. FEST":0,"REC. NOCT":0,"H.E.D":0,"H.E.N":0,"H.E.F.D":0,"H.E.F.N":0};
+}
+function mesKey(fecha){return`${fecha.getFullYear()}-${fecha.getMonth()}`;}
+
+// Calcula un día ya teniendo en cuenta la clasificación de manejo y confianza.
+// contadorDom es un objeto {mesKey: nº de domingos ya usados} que se muta
+// entre llamadas sucesivas (procesar los días de un colaborador en orden
+// cronológico ascendente).
+function calcularDia(turnoTxt,fecha,comentario,clase,contadorDom,capOverride){
+  const{segs,nota}=parseTurno(turnoTxt);
+  const obsBase=[comentario,nota].filter(Boolean).join(" | ")||null;
+
+  if(segs===null){
+    return{ambiguous:true,rest:true,ts:turnoTxt,td:null,cats:zeroCats(),
+      obs:[obsBase,"⚠ TURNO NO RECONOCIDO"].filter(Boolean).join(" | ")};
+  }
+  if(!segs.length){
+    return{ambiguous:false,rest:true,ts:turnoTxt||"DESCANSO",td:null,cats:zeroCats(),obs:obsBase};
+  }
+
+  let td=0;for(const s of segs)td+=s.fin-s.ini;td=Math.round(td*100)/100;
+
+  let cats,obsExtra=null;
+  if(clase==="MC"){
+    // Sin recargo/extra bajo ninguna circunstancia. La clasificación se
+    // explica una sola vez en el encabezado de la hoja, no en cada fila.
+    cats=zeroCats();
+  }else if(clase==="MC2D"){
+    const esDomingo=fecha.getDay()===0;
+    if(esDomingo){
+      const mk=mesKey(fecha);
+      const usados=contadorDom[mk]||0;
+      if(usados<2){
+        cats=clasificar(segs,fecha,capOverride);
+        contadorDom[mk]=usados+1;
+        obsExtra=`MANEJO Y CONFIANZA (excepción 2D) — domingo autorizado ${usados+1}/2`;
+      }else{
+        cats=zeroCats();
+        obsExtra="MANEJO Y CONFIANZA (excepción 2D) — domingo excedente (tope 2/mes)";
+      }
+    }else{
+      cats=zeroCats();
+    }
+  }else{
+    cats=clasificar(segs,fecha,capOverride);
+  }
+
+  const obs=[obsBase,obsExtra].filter(Boolean).join(" | ")||null;
+  return{ambiguous:false,rest:false,ts:turnoTxt,td,cats,obs};
 }
 
 const DIAS=["lunes","martes","miércoles","jueves","viernes","sábado","domingo"];
@@ -117,17 +336,56 @@ function celda(ws,fila,col){
   return(cell&&cell.v!==undefined&&cell.v!==null)?cell.v:null;
 }
 
-function procesarWB(wb,desde,hasta){
+// Limpia el encabezado técnico que Excel/Teams agrega a comentarios
+// encadenados, conservando solo el texto útil escrito por el administrador.
+// Corrige "mojibake" típico cuando un texto UTF-8 quedó interpretado como
+// Latin-1 (aparecen secuencias como "Ã©", "Ã±", "Ã¡"). Si detecta ese patrón,
+// reinterpreta los bytes como UTF-8; si no, deja el texto intacto.
+function corregirMojibake(s){
+  if(!s||!/Ã[\u0080-\u00BF]|â€/.test(s))return s;
+  try{
+    const bytes=Uint8Array.from(s,c=>c.charCodeAt(0)&0xFF);
+    const fixed=new TextDecoder("utf-8",{fatal:true}).decode(bytes);
+    return fixed;
+  }catch(e){
+    return s;
+  }
+}
+
+// Limpia el texto de un comentario de celda (uno o varios encadenados),
+// quitando el encabezado técnico de comentarios encadenados de Excel/Teams.
+// No se incluye el autor del comentario en el resultado: sólo el texto útil.
+function limpiarComentario(txt){
+  let s=corregirMojibake((txt||"").toString());
+  s=s.replace(/\[Comentario encadenado\][\s\S]*?Comentario:\s*/i,"");
+  s=s.trim();
+  return s||null;
+}
+
+// Extrae y limpia comentarios de celda (uno o varios encadenados). SheetJS
+// expone comentarios "legacy"/VML en cell.c como arreglo de {a: autor, t: texto};
+// los comentarios modernos (threadedComments) no siempre llegan por esta vía —
+// se registra en el log cuando la celda tiene turno pero no se pudo leer nota.
+function extraerComentario(ws,fila,col){
+  const addr=XLSX.utils.encode_cell({r:fila-1,c:col-1});
+  const cell=ws[addr];
+  if(!cell||!cell.c||!cell.c.length)return null;
+  const partes=cell.c.map(c=>limpiarComentario(c.t)).filter(Boolean);
+  return partes.length?partes.join(" | "):null;
+}
+
+function procesarWB(wb,desde,hasta,log){
   const cols={};
+  let hojasUsadas=0;
   for(const sn of wb.SheetNames){
     const ws=wb.Sheets[sn];
-    if(!ws['!ref'])continue;
+    if(!ws['!ref']){log&&log("warn",`Hoja "${sn}": vacía, se omite.`);continue;}
     const rango=XLSX.utils.decode_range(ws['!ref']);
     const maxFila=rango.e.r+1;
     const maxCol=Math.min(rango.e.c+1,9);
     const titulo=celda(ws,1,2);
     const ma=extraerMes(titulo);
-    if(!ma)continue;
+    if(!ma){log&&log("warn",`Hoja "${sn}": no se detectó título "SEMANA DEL...", se omite.`);continue;}
     const cm={};
     for(let c=3;c<=maxCol;c++){
       const diaTxt=celda(ws,2,c);
@@ -138,14 +396,18 @@ function procesarWB(wb,desde,hasta){
       const di=DIAS.findIndex(x=>x.normalize("NFD").replace(/[\u0300-\u036f]/g,"").startsWith(dia.substring(0,4)||"x"));
       cm[c]={diaSemana:di>=0?DIAS[di]:dia,numDia};
     }
-    if(!Object.keys(cm).length)continue;
+    if(!Object.keys(cm).length){log&&log("warn",`Hoja "${sn}": no se detectaron columnas de días, se omite.`);continue;}
+    hojasUsadas++;
+    log&&log("info",`Hoja "${sn}": semana de ${ma.mes+1}/${ma.anio}, ${Object.keys(cm).length} día(s) detectado(s).`);
     const allN=Object.values(cm).map(v=>v.numDia);
     const hasLate=allN.some(n=>n>=28);
     const hasEarly=allN.some(n=>n<=7);
+    let empleadosHoja=0;
     for(let r=4;r<=maxFila;r++){
       const nom=(celda(ws,r,2)||'').toString().trim();
       if(!nom||ignorar(nom))continue;
       const key=nom.toUpperCase().replace(/\s+/g," ");
+      let tieneTurno=false;
       for(const[cStr,ci]of Object.entries(cm)){
         const c=parseInt(cStr);
         const tr=(celda(ws,r,c)||'').toString().trim();
@@ -153,14 +415,32 @@ function procesarWB(wb,desde,hasta){
         let{mes,anio}=ma;let mf=mes,af=anio;
         if(hasLate&&hasEarly&&ci.numDia<=7){mf=mes+1;if(mf>11){mf=0;af=anio+1;}}
         const fecha=new Date(af,mf,ci.numDia);
-        if(desde&&fecha<desde)continue;
-        if(hasta&&fecha>hasta)continue;
+        // El dia se conserva SIEMPRE, incluso si queda fuera del rango
+        // solicitado: el tope semanal (42h/44h, Ley 2466/2025) es un concepto
+        // de semana calendario completa (lunes-domingo), independiente del
+        // recorte del reporte. Si se descartara aqui, una semana parcial al
+        // inicio o fin del rango mostraria un total artificialmente bajo y
+        // el tope diario de 7h/8h podria activarse o no segun donde caiga el
+        // corte del reporte, en vez de segun las horas reales trabajadas esa
+        // semana. Los dias fuera de rango solo se usan para ese calculo del
+        // tope; nunca aparecen como fila en el reporte de salida.
+        const enRango=(!desde||fecha>=desde)&&(!hasta||fecha<=hasta);
+        if(enRango)tieneTurno=true;
+        const comentario=extraerComentario(ws,r,c);
         if(!cols[key])cols[key]={nombre:nom,dias:[]};
-        cols[key].dias.push({fecha,diaSemana:ci.diaSemana,turno:tr});
+        cols[key].dias.push({fecha,diaSemana:ci.diaSemana,turno:tr,comentario,semana:sn,enRango});
       }
+      if(tieneTurno)empleadosHoja++;
     }
+    log&&log("info",`Hoja "${sn}": ${empleadosHoja} colaborador(es) con turnos en el rango.`);
   }
+  if(!hojasUsadas)log&&log("error","Ninguna hoja del archivo pudo procesarse.");
   for(const c of Object.values(cols))c.dias.sort((a,b)=>a.fecha-b.fecha);
+  // Un colaborador solo se conserva si tiene al menos un dia dentro del rango
+  // solicitado; los dias "vecinos" fuera de rango no generan hoja de salida.
+  for(const key of Object.keys(cols)){
+    if(!cols[key].dias.some(d=>d.enRango))delete cols[key];
+  }
   return cols;
 }
 
@@ -177,53 +457,332 @@ function nombreHoja(nombre,usados){
   }
 }
 
-function generarXLSX(colaboradores,mesLabel){
-  const wb=XLSX.utils.book_new();const cf=[];let idx=1;
-  const usados=new Set(["CONSOLIDADO"]);
-  for(const[,col]of Object.entries(colaboradores)){
-    const wd=[];
-    wd.push(["REPORTE DE TRABAJO"]);wd.push([]);
-    wd.push(["MES",mesLabel]);wd.push([]);
-    wd.push(["NOMBRE",col.nombre]);wd.push([]);
-    wd.push(["DIA","FECHA","HORARIO","#HORAS","OBSERVACION","CPS",
-      "DOMINICAL","REC. NOCT. FEST","REC. NOCT","H.E.D","H.E.N","H.E.F.D","H.E.F.N"]);
-    const tots={};for(const c of COLS)tots[c]=0;let th=0;
-    for(const dia of col.dias){
-      const segs=parseTurno(dia.turno);
-      if(!segs){wd.push([dia.diaSemana,dia.fecha.getDate(),dia.turno]);continue;}
-      const h=clasificar(segs,dia.fecha);
-      let td=0;for(const s of segs)td+=s.fin-s.ini;td=Math.round(td*100)/100;th+=td;
-      for(const c of COLS)tots[c]+=h[c];
-      wd.push([dia.diaSemana,dia.fecha.getDate(),dia.turno,td,null,null,
-        h["DOMINICAL"]||null,h["REC. NOCT. FEST"]||null,h["REC. NOCT"]||null,
-        h["H.E.D"]||null,h["H.E.N"]||null,h["H.E.F.D"]||null,h["H.E.F.N"]||null]);
+// ─── ARCHIVO MAESTRO DE COLABORADORES (opcional: NOMBRE + CÉDULA) ───────────
+// Nunca se hardcodean nombres de colaboradores en el código: si el usuario
+// no sube maestro, la columna CC simplemente queda vacía.
+function normalizarNombre(n){
+  return(n||"").toString().trim().toUpperCase().replace(/\s+/g," ")
+    .normalize("NFD").replace(/[\u0300-\u036f]/g,"");
+}
+function tokenizarNombre(n){
+  return normalizarNombre(n).split(" ").filter(Boolean);
+}
+
+// Distancia de edición (Levenshtein) entre dos palabras, para tolerar
+// pequeños errores de tipeo del listado de colaboradores (ej. "ORNEYDIS" vs
+// "ORNEIDYS", "PINILLO" vs "PNILLO") sin recurrir a librerías externas.
+function distanciaLevenshtein(a,b){
+  const m=a.length,n=b.length;
+  if(!m)return n;if(!n)return m;
+  let prev=new Array(n+1);for(let j=0;j<=n;j++)prev[j]=j;
+  for(let i=1;i<=m;i++){
+    const cur=[i];
+    for(let j=1;j<=n;j++){
+      const costo=a[i-1]===b[j-1]?0:1;
+      cur[j]=Math.min(prev[j]+1,cur[j-1]+1,prev[j-1]+costo);
     }
-    wd.push(["TOTAL",null,null,Math.round(th*100)/100,null,null,
-      tots["DOMINICAL"]||null,tots["REC. NOCT. FEST"]||null,tots["REC. NOCT"]||null,
-      tots["H.E.D"]||null,tots["H.E.N"]||null,tots["H.E.F.D"]||null,tots["H.E.F.N"]||null]);
-    const sn=nombreHoja(col.nombre,usados);
-    XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet(wd),sn);
-    cf.push({idx:idx++,nombre:col.nombre,tots:{...tots},
+    prev=cur;
+  }
+  return prev[n];
+}
+// Dos palabras se consideran "el mismo nombre/apellido" si son idénticas o
+// difieren por un margen de tipeo pequeño en proporción a su longitud.
+function tokensSimilares(a,b){
+  if(a===b)return true;
+  if(a.length<3||b.length<3)return false;
+  const d=distanciaLevenshtein(a,b);
+  const largo=Math.max(a.length,b.length);
+  return d<=1||(d<=2&&largo>=7);
+}
+// true si CADA palabra de tokensChicos tiene una palabra similar en tokensGrandes.
+function esSubconjunto(tokensChicos,tokensGrandes){
+  return tokensChicos.length>0&&tokensChicos.every(tc=>tokensGrandes.some(tg=>tokensSimilares(tc,tg)));
+}
+
+// Busca en el listado de colaboradores (arreglo maestroList) a quién
+// corresponde un nombre tal como aparece en el semanario. El semanario suele
+// traer nombres parciales o apodos ("MANUEL FERNANDEZ" en vez de "JUAN
+// MANUEL FERNANDEZ" en el listado oficial), así que la igualdad exacta no
+// basta: primero se intenta coincidencia exacta y, si no hay, coincidencia
+// por subconjunto de palabras en cualquier dirección (tolerando pequeños
+// errores de tipeo). Si más de un colaborador del listado calza, se marca
+// como ambiguo y NO se rellena automáticamente — es preferible dejar CC y
+// Cargo en blanco a asignarle los datos de otra persona.
+function buscarEnMaestro(nombreSemanario,maestroList){
+  if(!maestroList||!maestroList.length)return{tipo:"sin_maestro"};
+  const clave=normalizarNombre(nombreSemanario);
+  const exactos=maestroList.filter(m=>m.nombreNorm===clave);
+  if(exactos.length===1)return{tipo:"exacto",match:exactos[0]};
+  if(exactos.length>1)return{tipo:"ambiguo",candidatos:exactos};
+  const tokensSem=tokenizarNombre(nombreSemanario);
+  const candidatos=maestroList.filter(m=>
+    esSubconjunto(tokensSem,m.tokens)||esSubconjunto(m.tokens,tokensSem));
+  if(candidatos.length===1)return{tipo:"aproximado",match:candidatos[0]};
+  if(candidatos.length>1)return{tipo:"ambiguo",candidatos};
+  return{tipo:"sin_match"};
+}
+
+function parseMaestro(wb,log){
+  const lista=[];
+  const ws=wb.Sheets[wb.SheetNames[0]];
+  if(!ws||!ws['!ref']){log&&log("warn","Maestro: archivo vacío, se ignora.");return lista;}
+  const rango=XLSX.utils.decode_range(ws['!ref']);
+  const maxCol=rango.e.c+1;
+  const maxFila=rango.e.r+1;
+  let colNombre=-1,colCedula=-1,colCargo=-1;
+  // Busca la fila de encabezados (primeras filas, admite listados con
+  // encabezado corrido más abajo) por texto NOMBRE/CEDULA/CC/DOCUMENTO/CARGO.
+  // El listado (que puede variar según la regional y quien lo suba) se lee
+  // en cada ejecución y solo vive en memoria del navegador mientras se
+  // procesa: nunca se guardan nombres ni documentos de colaboradores en la
+  // memoria de Claude.
+  for(let r=1;r<=Math.min(10,maxFila);r++){
+    for(let c=1;c<=maxCol;c++){
+      const v=(celda(ws,r,c)||"").toString().trim().toUpperCase();
+      if(!v)continue;
+      if(colNombre<0&&v.includes("NOMBRE"))colNombre=c;
+      if(colCedula<0&&(v.includes("CEDULA")||v.includes("CÉDULA")||v==="CC"||v.includes("DOCUMENTO")))colCedula=c;
+      if(colCargo<0&&v.includes("CARGO"))colCargo=c;
+    }
+    if(colNombre>=0&&colCedula>=0){
+      for(let rr=r+1;rr<=maxFila;rr++){
+        const nom=celda(ws,rr,colNombre);
+        const ced=celda(ws,rr,colCedula);
+        const cargo=colCargo>=0?celda(ws,rr,colCargo):null;
+        if(!nom)continue;
+        const nombreOriginal=nom.toString().trim();
+        lista.push({
+          nombreOriginal,
+          nombreNorm:normalizarNombre(nombreOriginal),
+          tokens:tokenizarNombre(nombreOriginal),
+          cc:(ced||"").toString().trim(),
+          cargo:(cargo||"").toString().trim(),
+        });
+      }
+      log&&log("success",`Maestro: ${lista.length} colaborador(es) con cédula${colCargo>=0?" y cargo":""} cargados.`);
+      return lista;
+    }
+  }
+  log&&log("warn","Maestro: no se encontraron columnas NOMBRE/CÉDULA reconocibles, se ignora el archivo.");
+  return lista;
+}
+
+async function generarXLSX(colaboradores,mesLabel,maestro,log,clasifEmpleado){
+  maestro=maestro||[];
+  clasifEmpleado=clasifEmpleado||{};
+  const workbook=new ExcelJS.Workbook();
+  const usados=new Set(["CONSOLIDADO"]);
+  const cf=[];let idx=1;
+  let totalAmbiguos=0,totalObservaciones=0,totalMC=0,totalMC2D=0;
+
+  const COLHDRS=["DIA","FECHA","HORARIO","#HORAS","OBSERVACION","CPS",
+    "DOMINICAL","REC. NOCT. FEST","REC. NOCT","H.E.D","H.E.N","H.E.F.D","H.E.F.N"];
+  const NCOLS=COLHDRS.length;
+
+  // ─── Estilo corporativo: fondo blanco, bordes finos, encabezados en azul ───
+  const THIN={style:"thin",color:{argb:"FFC3CCDE"}};
+  const BORDE_FINO={top:THIN,left:THIN,bottom:THIN,right:THIN};
+  const BORDE_TOTAL={top:{style:"medium",color:{argb:"FF1B396B"}},
+    left:THIN,bottom:THIN,right:THIN};
+  const FILL_HEADER={type:"pattern",pattern:"solid",fgColor:{argb:"FF1B396B"}};
+  const FILL_BLANCO={type:"pattern",pattern:"solid",fgColor:{argb:"FFFFFFFF"}};
+  const FONT_HEADER={color:{argb:"FFFFFFFF"},bold:true,size:10};
+  const FONT_BOLD={bold:true,color:{argb:"FF1B396B"}};
+  const FONT_TITLE={bold:true,size:13,color:{argb:"FF1B396B"}};
+  const FONT_NOTA={italic:true,color:{argb:"FF9A5B00"}};
+
+  let totalSinMatch=0,totalAmbiguoMatch=0,totalAproxMatch=0;
+  for(const[,col]of Object.entries(colaboradores)){
+    // Empareja el nombre del semanario contra el listado de colaboradores
+    // (que puede variar por regional/usuario) para traer CC y Cargo, y para
+    // usar el nombre completo oficial del listado como identidad a mostrar
+    // cuando el semanario trae un nombre parcial o un apodo.
+    const resMatch=buscarEnMaestro(col.nombre,maestro);
+    let cc="",cargo="",nombreMostrar=col.nombre;
+    if(resMatch.tipo==="exacto"||resMatch.tipo==="aproximado"){
+      cc=resMatch.match.cc||"";
+      cargo=resMatch.match.cargo||"";
+      nombreMostrar=resMatch.match.nombreOriginal||col.nombre;
+      if(resMatch.tipo==="aproximado"){
+        totalAproxMatch++;
+        log&&log("info",`"${col.nombre}" emparejado por aproximación con "${nombreMostrar}" del listado de colaboradores.`);
+      }
+    }else if(resMatch.tipo==="ambiguo"){
+      totalAmbiguoMatch++;
+      log&&log("warn",`"${col.nombre}": coincide con ${resMatch.candidatos.length} colaboradores del listado — no se pudo determinar cuál es, CC y Cargo quedan vacíos.`);
+    }else if(resMatch.tipo==="sin_match"){
+      totalSinMatch++;
+      log&&log("warn",`"${col.nombre}": no se encontró en el listado de colaboradores — CC y Cargo quedan vacíos.`);
+    }
+    const clase=clasifEmpleado[normalizarNombre(col.nombre)]||"NA";
+    if(clase==="MC")totalMC++;else if(clase==="MC2D")totalMC2D++;
+    const etiquetaClase=clase==="MC"?" (MANEJO Y CONFIANZA)":clase==="MC2D"?" (MANEJO Y CONFIANZA — EXCEPCIÓN 2D)":"";
+
+    const sn=nombreHoja(nombreMostrar,usados);
+    const ws=workbook.addWorksheet(sn,{views:[{showGridLines:false}]});
+    ws.properties.defaultRowHeight=16;
+    ws.columns=[
+      {width:12},{width:8},{width:16},{width:9},{width:36},{width:8},
+      {width:11},{width:14},{width:11},{width:9},{width:9},{width:10},{width:10},
+    ];
+
+    const rTitulo=ws.addRow(["REPORTE DE TRABAJO"]);
+    rTitulo.getCell(1).font=FONT_TITLE;
+    ws.addRow([]);
+    const rMes=ws.addRow(["MES",mesLabel]);
+    rMes.getCell(1).font=FONT_BOLD;
+    ws.addRow([]);
+    const rNombre=ws.addRow(["NOMBRE",nombreMostrar+etiquetaClase,null,"CC",cc,null,"CARGO",cargo]);
+    rNombre.getCell(1).font=FONT_BOLD;rNombre.getCell(4).font=FONT_BOLD;rNombre.getCell(7).font=FONT_BOLD;
+    const filaNombre=rNombre.number;
+    if(clase==="MC"){
+      const rNota=ws.addRow(["NOTA",
+        "Manejo y confianza: no aplica recargo ni hora extra en ningún día trabajado."]);
+      rNota.getCell(1).font={...FONT_NOTA,bold:true};
+      rNota.getCell(2).font=FONT_NOTA;
+    }else if(clase==="MC2D"){
+      const rNota=ws.addRow(["NOTA",
+        "Manejo y confianza — Excepción 2D: recargo y hora extra sólo aplican hasta 2 domingos autorizados por mes calendario; los demás días no generan recargo ni extra."]);
+      rNota.getCell(1).font={...FONT_NOTA,bold:true};
+      rNota.getCell(2).font=FONT_NOTA;
+    }
+    ws.addRow([]);
+
+    const rHead=ws.addRow(COLHDRS);
+    rHead.eachCell(c=>{c.font=FONT_HEADER;c.fill=FILL_HEADER;c.border=BORDE_FINO;
+      c.alignment={horizontal:"center",vertical:"middle",wrapText:true};});
+
+    const tots={};for(const c of COLS)tots[c]=0;let th=0;
+    const contadorDom={};
+    const caps=calcularCapsSemanales(col.dias);
+    const filaPrimerDia=ws.rowCount+1;
+
+    for(const dia of col.dias){
+      if(!dia.enRango)continue; // solo se usa para el tope semanal, no para el reporte
+      const capDiaria=caps[inicioSemana(dia.fecha)];
+      const r=calcularDia(dia.turno,dia.fecha,dia.comentario,clase,contadorDom,capDiaria);
+      if(r.obs)totalObservaciones++;
+      let fila;
+      if(r.ambiguous){
+        totalAmbiguos++;
+        log&&log("warn",`${col.nombre} — ${dia.fecha.toLocaleDateString("es-CO")}: turno no reconocido ("${dia.turno}"), se excluye del cálculo.`);
+        fila=ws.addRow([dia.diaSemana,dia.fecha.getDate(),dia.turno,null,r.obs]);
+      }else if(r.rest){
+        fila=ws.addRow([dia.diaSemana,dia.fecha.getDate(),r.ts,null,r.obs]);
+      }else{
+        th+=r.td;
+        for(const c of COLS)tots[c]+=r.cats[c];
+        fila=ws.addRow([dia.diaSemana,dia.fecha.getDate(),dia.turno,r.td,r.obs,null,
+          r.cats["DOMINICAL"]||null,r.cats["REC. NOCT. FEST"]||null,r.cats["REC. NOCT"]||null,
+          r.cats["H.E.D"]||null,r.cats["H.E.N"]||null,r.cats["H.E.F.D"]||null,r.cats["H.E.F.N"]||null]);
+      }
+      for(let ci=1;ci<=NCOLS;ci++){
+        const cell=fila.getCell(ci);
+        cell.border=BORDE_FINO;cell.fill=FILL_BLANCO;
+      }
+      fila.getCell(5).alignment={wrapText:true};
+    }
+    const filaUltimoDia=ws.rowCount;
+
+    // Fila TOTAL con fórmulas SUM (no valores estáticos): si el administrador
+    // edita manualmente una hora en cualquier día, el total —y en cascada el
+    // consolidado, que referencia este total— se recalcula solo.
+    const rTotal=ws.addRow(["TOTAL",null,null,
+      {formula:`SUM(D${filaPrimerDia}:D${filaUltimoDia})`,result:Math.round(th*100)/100},
+      null,null,
+      {formula:`SUM(G${filaPrimerDia}:G${filaUltimoDia})`,result:tots["DOMINICAL"]||0},
+      {formula:`SUM(H${filaPrimerDia}:H${filaUltimoDia})`,result:tots["REC. NOCT. FEST"]||0},
+      {formula:`SUM(I${filaPrimerDia}:I${filaUltimoDia})`,result:tots["REC. NOCT"]||0},
+      {formula:`SUM(J${filaPrimerDia}:J${filaUltimoDia})`,result:tots["H.E.D"]||0},
+      {formula:`SUM(K${filaPrimerDia}:K${filaUltimoDia})`,result:tots["H.E.N"]||0},
+      {formula:`SUM(L${filaPrimerDia}:L${filaUltimoDia})`,result:tots["H.E.F.D"]||0},
+      {formula:`SUM(M${filaPrimerDia}:M${filaUltimoDia})`,result:tots["H.E.F.N"]||0}]);
+    rTotal.eachCell(c=>{c.font=FONT_BOLD;c.fill=FILL_BLANCO;c.border=BORDE_TOTAL;});
+    const filaTotal=rTotal.number;
+
+    log&&log("info",`Hoja generada: "${sn}"${etiquetaClase} (${col.dias.filter(d=>d.enRango).length} día(s)).`);
+    cf.push({idx:idx++,nombre:col.nombre,nombreMostrar,cc,cargo,clase,sn,filaTotal,filaNombre,tots:{...tots},
       total:Object.values(tots).reduce((a,b)=>a+b,0)});
   }
-  const cs=[];
-  cs.push([`NOVEDADES NOMINA MES DE ${mesLabel}`]);
-  cs.push([null,null,null,"DOMINICAL 80%","REC. NOCT.FEST %","REC. NOCT 35%",
+  if(totalAproxMatch||totalAmbiguoMatch||totalSinMatch)
+    log&&log("info",`Listado de colaboradores: ${totalAproxMatch} emparejado(s) por aproximación, ${totalAmbiguoMatch} ambiguo(s), ${totalSinMatch} sin coincidencia.`);
+
+  // ─── CONSOLIDADO ────────────────────────────────────────────────────────
+  // Formulado con referencias vivas a la hoja individual de cada colaborador:
+  // NOMBRE, CC y CARGO se traen con fórmula desde la celda correspondiente de
+  // su propia hoja (igual que los totales de horas), así que si se corrige a
+  // mano cualquiera de esos datos en la hoja del colaborador, el consolidado
+  // se actualiza solo al recalcular en Excel.
+  const wsC=workbook.addWorksheet("CONSOLIDADO",{views:[{showGridLines:false}]});
+  wsC.columns=[{width:5},{width:32},{width:12},{width:22},{width:11},{width:14},
+    {width:11},{width:9},{width:9},{width:10},{width:10},{width:8},{width:11}];
+
+  const rT1=wsC.addRow([`NOVEDADES NOMINA MES DE ${mesLabel}`]);
+  rT1.getCell(1).font=FONT_TITLE;
+  const rPct=wsC.addRow([null,null,null,null,"DOMINICAL 80%","REC. NOCT.FEST %","REC. NOCT 35%",
     "H.E.D 25%","H.E.N 75%","H.E.F.D 100%","H.E.F.N 150%"]);
-  cs.push([]);
-  cs.push([null,"NOMBRE COMPLETO",null,"DOMINICAL","REC. NOCT. FEST","REC. NOCT",
+  rPct.eachCell(c=>{c.font={italic:true,size:9,color:{argb:"FF6B7A99"}};});
+  wsC.addRow([]);
+
+  const rHeadC=wsC.addRow([null,"NOMBRE COMPLETO","CC","CARGO","DOMINICAL","REC. NOCT. FEST","REC. NOCT",
     "H.E.D","H.E.N","H.E.F.D","H.E.F.N","OBS","TOTAL"]);
-  for(const f of cf)cs.push([f.idx,f.nombre,null,
-    f.tots["DOMINICAL"]||null,f.tots["REC. NOCT. FEST"]||null,f.tots["REC. NOCT"]||null,
-    f.tots["H.E.D"]||null,f.tots["H.E.N"]||null,f.tots["H.E.F.D"]||null,
-    f.tots["H.E.F.N"]||null,null,f.total||null]);
+  rHeadC.eachCell(c=>{c.font=FONT_HEADER;c.fill=FILL_HEADER;c.border=BORDE_FINO;
+    c.alignment={horizontal:"center",vertical:"middle",wrapText:true};});
+
+  const refHoja=nombre=>`'${nombre.replace(/'/g,"''")}'`;
+  const filaPrimerEmpleado=wsC.rowCount+1;
+  for(const f of cf){
+    const ref=refHoja(f.sn);
+    const filaActual=wsC.rowCount+1;
+    const nombreConClase=f.nombreMostrar+(f.clase==="MC"?" (MC)":f.clase==="MC2D"?" (MC-2D)":"");
+    // NOMBRE, CC y CARGO se traen con fórmula desde la propia hoja del
+    // colaborador (fila "NOMBRE": columna B=nombre, E=CC, H=CARGO), igual que
+    // los totales de horas — así una corrección manual en la hoja individual
+    // se refleja sola en el consolidado al recalcular.
+    const fila=wsC.addRow([f.idx,
+      {formula:`IF(${ref}!B${f.filaNombre}="","",${ref}!B${f.filaNombre})`,result:nombreConClase},
+      {formula:`IF(${ref}!E${f.filaNombre}="","",${ref}!E${f.filaNombre})`,result:f.cc||""},
+      {formula:`IF(${ref}!H${f.filaNombre}="","",${ref}!H${f.filaNombre})`,result:f.cargo||""},
+      {formula:`${ref}!G${f.filaTotal}`,result:f.tots["DOMINICAL"]||0},
+      {formula:`${ref}!H${f.filaTotal}`,result:f.tots["REC. NOCT. FEST"]||0},
+      {formula:`${ref}!I${f.filaTotal}`,result:f.tots["REC. NOCT"]||0},
+      {formula:`${ref}!J${f.filaTotal}`,result:f.tots["H.E.D"]||0},
+      {formula:`${ref}!K${f.filaTotal}`,result:f.tots["H.E.N"]||0},
+      {formula:`${ref}!L${f.filaTotal}`,result:f.tots["H.E.F.D"]||0},
+      {formula:`${ref}!M${f.filaTotal}`,result:f.tots["H.E.F.N"]||0},
+      null,
+      {formula:`E${filaActual}+F${filaActual}+G${filaActual}+H${filaActual}+I${filaActual}+J${filaActual}+K${filaActual}`,result:f.total||0}]);
+    for(let ci=1;ci<=13;ci++){const cell=fila.getCell(ci);cell.border=BORDE_FINO;cell.fill=FILL_BLANCO;}
+  }
+  const filaUltimoEmpleado=wsC.rowCount;
   const tot={};for(const c of COLS)tot[c]=cf.reduce((s,f)=>s+(f.tots[c]||0),0);
-  cs.push(["TOTALES",null,null,tot["DOMINICAL"]||null,tot["REC. NOCT. FEST"]||null,
-    tot["REC. NOCT"]||null,tot["H.E.D"]||null,tot["H.E.N"]||null,
-    tot["H.E.F.D"]||null,tot["H.E.F.N"]||null,"TOTAL:",
-    cf.reduce((s,f)=>s+f.total,0)]);
-  XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet(cs),"CONSOLIDADO");
-  return wb;
+  const rTotC=wsC.addRow(["TOTALES",null,null,null,
+    {formula:`SUM(E${filaPrimerEmpleado}:E${filaUltimoEmpleado})`,result:tot["DOMINICAL"]||0},
+    {formula:`SUM(F${filaPrimerEmpleado}:F${filaUltimoEmpleado})`,result:tot["REC. NOCT. FEST"]||0},
+    {formula:`SUM(G${filaPrimerEmpleado}:G${filaUltimoEmpleado})`,result:tot["REC. NOCT"]||0},
+    {formula:`SUM(H${filaPrimerEmpleado}:H${filaUltimoEmpleado})`,result:tot["H.E.D"]||0},
+    {formula:`SUM(I${filaPrimerEmpleado}:I${filaUltimoEmpleado})`,result:tot["H.E.N"]||0},
+    {formula:`SUM(J${filaPrimerEmpleado}:J${filaUltimoEmpleado})`,result:tot["H.E.F.D"]||0},
+    {formula:`SUM(K${filaPrimerEmpleado}:K${filaUltimoEmpleado})`,result:tot["H.E.F.N"]||0},
+    "TOTAL:",
+    {formula:`SUM(M${filaPrimerEmpleado}:M${filaUltimoEmpleado})`,result:cf.reduce((s,f)=>s+f.total,0)}]);
+  rTotC.eachCell(c=>{c.font=FONT_BOLD;c.fill=FILL_BLANCO;c.border=BORDE_TOTAL;});
+
+  log&&log(totalAmbiguos?"warn":"success",
+    `Consolidado generado: ${cf.length} colaborador(es), ${totalObservaciones} observación(es) extraída(s), ${totalAmbiguos} turno(s) ambiguo(s).`);
+  if(totalMC||totalMC2D)
+    log&&log("info",`Manejo y confianza: ${totalMC} sin recargo/extra, ${totalMC2D} con excepción de 2 domingos/mes.`);
+  return workbook;
+}
+
+async function descargarWorkbook(workbook,filename){
+  const buffer=await workbook.xlsx.writeBuffer();
+  const blob=new Blob([buffer],{type:"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"});
+  const url=URL.createObjectURL(blob);
+  const a=document.createElement("a");
+  a.href=url;a.download=filename;document.body.appendChild(a);a.click();
+  document.body.removeChild(a);
+  setTimeout(()=>URL.revokeObjectURL(url),1000);
 }
 
 // ─── PALETA OFICIAL ──────────────────────────────────────────────────────────
@@ -263,6 +822,8 @@ const lbl={
 function App(){
   const[archivo,setArchivo]=useState(null);
   const[nombreArchivo,setNombreArchivo]=useState("");
+  const[archivoMaestro,setArchivoMaestro]=useState(null);
+  const[nombreMaestro,setNombreMaestro]=useState("");
   const[regional,setRegional]=useState("");
   const[mes,setMes]=useState("");
   const[desde,setDesde]=useState("");
@@ -271,43 +832,137 @@ function App(){
   const[resultado,setResultado]=useState(null);
   const[error,setError]=useState(null);
   const[preview,setPreview]=useState(null);
+  const[logs,setLogs]=useState([]);
+  const[copiado,setCopiado]=useState(false);
+  const logRef=React.useRef(null);
+
+  const log=useCallback((nivel,msg)=>{
+    setLogs(prev=>[...prev,{ts:new Date(),nivel,msg}]);
+  },[]);
+
+  React.useEffect(()=>{
+    if(logRef.current)logRef.current.scrollTop=logRef.current.scrollHeight;
+  },[logs]);
 
   const cargar=useCallback(f=>{
     if(!f)return;
     setArchivo(f);setNombreArchivo(f.name);
-    setError(null);setResultado(null);setPreview(null);
+    setError(null);setResultado(null);setPreview(null);setLogs([]);
   },[]);
 
-  const procesar=useCallback(async()=>{
+  const cargarMaestro=useCallback(f=>{
+    if(!f)return;
+    setArchivoMaestro(f);setNombreMaestro(f.name);
+  },[]);
+
+  const copiarLog=useCallback(()=>{
+    const texto=logs.map(l=>`[${l.ts.toLocaleTimeString("es-CO")}] ${l.nivel.toUpperCase()}: ${l.msg}`).join("\n");
+    if(navigator.clipboard&&navigator.clipboard.writeText){
+      navigator.clipboard.writeText(texto).then(()=>{
+        setCopiado(true);setTimeout(()=>setCopiado(false),2000);
+      });
+    }
+  },[logs]);
+
+  const[showClasModal,setShowClasModal]=useState(false);
+  const[clasEmpleado,setClasEmpleado]=useState({});
+  const[filtroClas,setFiltroClas]=useState("");
+  const pendingRef=React.useRef(null);
+
+  const iniciarProceso=useCallback(async()=>{
     if(!archivo){setError("Selecciona el SemanarioCDP.xlsx");return;}
     if(!regional){setError("Selecciona la regional o parque");return;}
     if(!mes.trim()){setError("Indica el mes/período (ej: MAYO 2026)");return;}
-    setProcesando(true);setError(null);
+    setProcesando(true);setError(null);setLogs([]);setResultado(null);setPreview(null);
     try{
+      log("info",`Leyendo archivo "${nombreArchivo}"…`);
       const buf=await archivo.arrayBuffer();
-      const wb=XLSX.read(buf,{type:"array"});
+      const wb=XLSX.read(buf,{type:"array",cellStyles:true});
+      log("success",`Archivo leído: ${wb.SheetNames.length} hoja(s) encontrada(s).`);
+
+      let maestro={};
+      if(archivoMaestro){
+        log("info",`Leyendo maestro de colaboradores "${nombreMaestro}"…`);
+        const bufM=await archivoMaestro.arrayBuffer();
+        const wbM=XLSX.read(bufM,{type:"array"});
+        maestro=parseMaestro(wbM,log);
+      }
+
       const d=procesarWB(wb,
         desde?new Date(desde+"T00:00:00"):null,
-        hasta?new Date(hasta+"T23:59:59"):null);
+        hasta?new Date(hasta+"T23:59:59"):null,
+        log);
       const n=Object.keys(d).length;
-      if(!n){setError("Sin colaboradores en el rango indicado.");setProcesando(false);return;}
-      const wbo=generarXLSX(d,mes.toUpperCase().trim());
+      if(!n){
+        log("error","Sin colaboradores en el rango indicado.");
+        setError("Sin colaboradores en el rango indicado.");setProcesando(false);return;
+      }
+      log("info",`${n} colaborador(es) detectado(s). Selecciona el personal de manejo y confianza antes de calcular…`);
+
+      pendingRef.current={wb,d,maestro};
+      // Por defecto todos quedan en NA (cálculo normal); conserva selección previa si el nombre coincide.
+      setClasEmpleado(prev=>{
+        const next={};
+        for(const nombre of Object.keys(d)){
+          const key=normalizarNombre(d[nombre].nombre);
+          next[key]=prev[key]||"NA";
+        }
+        return next;
+      });
+      setFiltroClas("");
+      setShowClasModal(true);
+    }catch(e){
+      log("error","Error: "+e.message);
+      setError("Error: "+e.message);
+    }
+    setProcesando(false);
+  },[archivo,archivoMaestro,nombreArchivo,nombreMaestro,regional,mes,desde,hasta,log]);
+
+  const confirmarClasificacion=useCallback(async()=>{
+    const pend=pendingRef.current;
+    if(!pend)return;
+    setShowClasModal(false);
+    setProcesando(true);
+    try{
+      const{d,maestro}=pend;
+      const nMC=Object.values(clasEmpleado).filter(c=>c==="MC").length;
+      const nMC2D=Object.values(clasEmpleado).filter(c=>c==="MC2D").length;
+      if(nMC||nMC2D)
+        log("info",`Clasificación aplicada: ${nMC} de manejo y confianza, ${nMC2D} con excepción de 2 domingos/mes.`);
+
+      const wbo=await generarXLSX(d,mes.toUpperCase().trim(),maestro,log,clasEmpleado);
+
       const prev=Object.values(d).map(col=>{
+        const clase=clasEmpleado[normalizarNombre(col.nombre)]||"NA";
         const t={};for(const c of COLS)t[c]=0;
+        const contadorDom={};
+        const caps=calcularCapsSemanales(col.dias);
         for(const dia of col.dias){
-          const s=parseTurno(dia.turno);if(!s)continue;
-          const h=clasificar(s,dia.fecha);for(const c of COLS)t[c]+=h[c];
+          if(!dia.enRango)continue; // solo se usa para el tope semanal, no para el reporte
+          const capDiaria=caps[inicioSemana(dia.fecha)];
+          const r=calcularDia(dia.turno,dia.fecha,dia.comentario,clase,contadorDom,capDiaria);
+          if(r.ambiguous||r.rest)continue;
+          for(const c of COLS)t[c]+=r.cats[c];
         }
         return{nombre:col.nombre,t,
           ext:t["H.E.D"]+t["H.E.N"]+t["H.E.F.D"]+t["H.E.F.N"]};
       });
       setPreview(prev);
+      const n=Object.keys(d).length;
       const fn=`HORAS_EXTRAS_${mes.toUpperCase().replace(/\s+/g,"_")}_${regional}.xlsx`;
-      XLSX.writeFile(wbo,fn);
+      await descargarWorkbook(wbo,fn);
+      log("success",`Archivo descargado: ${fn}`);
       setResultado({n,fn});
-    }catch(e){setError("Error: "+e.message);}
+    }catch(e){
+      log("error","Error: "+e.message);
+      setError("Error: "+e.message);
+    }
     setProcesando(false);
-  },[archivo,regional,mes,desde,hasta]);
+  },[clasEmpleado,mes,regional,log]);
+
+  const setClase=useCallback((key,valor)=>{
+    setClasEmpleado(prev=>({...prev,[key]:valor}));
+  },[]);
 
   return(
     <div style={{minHeight:"100vh",background:LO.azulOscuro,
@@ -360,6 +1015,28 @@ function App(){
           )}
         </div>
 
+        {/* MAESTRO OPCIONAL */}
+        <div onDrop={e=>{e.preventDefault();cargarMaestro(e.dataTransfer.files[0]);}}
+          onDragOver={e=>e.preventDefault()}
+          onClick={()=>document.getElementById("fm").click()}
+          style={{border:`1px dashed ${archivoMaestro?"rgba(39,174,96,0.5)":LO.azulBorde}`,
+            borderRadius:6,padding:"12px 16px",cursor:"pointer",
+            background:archivoMaestro?LO.verdeBg:"rgba(255,255,255,0.02)",
+            marginBottom:22,display:"flex",alignItems:"center",gap:10,
+            transition:"border 0.2s,background 0.2s"}}>
+          <input id="fm" type="file" accept=".xlsx,.xls"
+            onChange={e=>cargarMaestro(e.target.files[0])} style={{display:"none"}}/>
+          <span style={{fontSize:16}}>{archivoMaestro?"✓":"📇"}</span>
+          <div style={{flex:1}}>
+            <div style={{fontSize:12,fontWeight:700,color:archivoMaestro?"#58D68D":LO.textoSub}}>
+              {archivoMaestro?nombreMaestro:"Maestro de colaboradores (opcional)"}
+            </div>
+            <div style={{fontSize:10,color:LO.textoDim,marginTop:2}}>
+              Excel con columnas NOMBRE y CÉDULA — enriquece la CC en el reporte, sin afectar el cálculo
+            </div>
+          </div>
+        </div>
+
         {/* CAMPOS */}
         <div style={{display:"grid",gridTemplateColumns:"1.3fr 1.3fr 1fr 1fr",
           gap:14,marginBottom:20}}>
@@ -388,14 +1065,14 @@ function App(){
         </div>
 
         {/* BOTÓN */}
-        <button onClick={procesar} disabled={procesando} style={{
+        <button onClick={iniciarProceso} disabled={procesando} style={{
           width:"100%",padding:"14px",
           background:procesando?"rgba(255,0,143,0.20)":LO.magenta,
           border:"none",borderRadius:4,color:LO.blanco,
           fontSize:14,fontWeight:700,letterSpacing:2.5,
           textTransform:"uppercase",cursor:procesando?"not-allowed":"pointer",
           opacity:procesando?0.6:1,fontFamily:"'Nunito Sans',sans-serif"}}>
-          {procesando?"Procesando turnos…":"Generar Reporte de Horas Extra"}
+          {procesando?"Leyendo archivo…":"Continuar"}
         </button>
 
         {/* ERROR */}
@@ -416,6 +1093,46 @@ function App(){
             </div>
             <div style={{fontSize:12,color:LO.textoDim}}>
               {resultado.n} colaboradores · {resultado.fn}
+            </div>
+          </div>
+        )}
+
+        {/* LOG DE PROCESO */}
+        {logs.length>0&&(
+          <div style={{marginTop:20}}>
+            <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",
+              marginBottom:8}}>
+              <div style={{fontSize:10,letterSpacing:3,color:LO.gris,
+                textTransform:"uppercase"}}>
+                Registro del proceso
+              </div>
+              <button onClick={copiarLog} style={{
+                background:"transparent",border:`1px solid ${LO.azulBorde}`,borderRadius:3,
+                color:copiado?"#58D68D":LO.textoSub,fontSize:10,letterSpacing:1,
+                padding:"4px 10px",cursor:"pointer",textTransform:"uppercase",
+                fontFamily:"'Nunito Sans',sans-serif"}}>
+                {copiado?"✓ Copiado":"Copiar log"}
+              </button>
+            </div>
+            <div ref={logRef} style={{
+              background:"#08152E",border:`1px solid ${LO.azulBorde}`,borderRadius:6,
+              padding:"12px 14px",maxHeight:220,overflowY:"auto",
+              fontFamily:"'SFMono-Regular',Consolas,monospace",fontSize:11.5,lineHeight:1.7}}>
+              {logs.map((l,i)=>{
+                const color=l.nivel==="error"?"#FF6B6B":l.nivel==="warn"?"#F2C94C":
+                  l.nivel==="success"?"#58D68D":LO.textoSub;
+                const icono=l.nivel==="error"?"✕":l.nivel==="warn"?"⚠":
+                  l.nivel==="success"?"✓":"›";
+                return(
+                  <div key={i} style={{color,display:"flex",gap:8}}>
+                    <span style={{color:LO.textoFaint,flexShrink:0}}>
+                      {l.ts.toLocaleTimeString("es-CO",{hour12:false})}
+                    </span>
+                    <span style={{flexShrink:0}}>{icono}</span>
+                    <span>{l.msg}</span>
+                  </div>
+                );
+              })}
             </div>
           </div>
         )}
@@ -476,8 +1193,9 @@ function App(){
           fontSize:10,color:LO.textoDim,lineHeight:1.9}}>
           <span style={{color:LO.gris,letterSpacing:2,fontSize:9}}>
             MARCO NORMATIVO · </span>
-          Nocturno ≥ 19:00 · Ley 2466/2025 desde 25-dic-2025 · Jornada 8h/día ·
-          44h/sem hasta 15-jul-2026 · Festivos Colombia 2026 (Ley Emiliani) ·
+          Nocturno ≥ 19:00 · Ley 2466/2025 desde 25-dic-2025 ·
+          Jornada 8h/día (44h/sem) hasta 15-jul-2026 · Jornada 7h/día (42h/sem) desde 16-jul-2026 ·
+          Festivos Colombia 2026 (Ley Emiliani) ·
           DOM 80% · R.N.F 35%+75% · R.NOC 35% · H.E.D 25% · H.E.N 75% · H.E.F.D 100% · H.E.F.N 150%
         </div>
 
@@ -493,6 +1211,106 @@ function App(){
         </div>
 
       </div>
+
+      {/* MODAL: CLASIFICACIÓN MANEJO Y CONFIANZA */}
+      {showClasModal&&(()=>{
+        const entries=Object.entries(pendingRef.current?.d||{});
+        const filtro=filtroClas.trim().toUpperCase();
+        const visibles=entries.filter(([,col])=>!filtro||col.nombre.toUpperCase().includes(filtro))
+          .sort((a,b)=>a[1].nombre.localeCompare(b[1].nombre,"es"));
+        const opciones=[
+          {val:"NA",label:"NA — No aplica",sub:"Cálculo normal"},
+          {val:"MC",label:"Manejo y confianza",sub:"Sin recargo ni hora extra"},
+          {val:"MC2D",label:"Manejo y confianza — Excepción 2D",sub:"Hasta 2 domingos/mes con recargo"},
+        ];
+        const nMC=Object.values(clasEmpleado).filter(c=>c==="MC").length;
+        const nMC2D=Object.values(clasEmpleado).filter(c=>c==="MC2D").length;
+        return(
+          <div style={{position:"fixed",inset:0,background:"rgba(6,14,34,0.82)",
+            zIndex:1000,display:"flex",alignItems:"center",justifyContent:"center",padding:20}}>
+            <div style={{background:LO.azulOscuro,border:`1px solid ${LO.azulBorde}`,
+              borderRadius:8,maxWidth:720,width:"100%",maxHeight:"88vh",
+              display:"flex",flexDirection:"column",overflow:"hidden",
+              boxShadow:"0 20px 60px rgba(0,0,0,0.5)"}}>
+
+              <div style={{padding:"18px 24px",borderBottom:`1px solid ${LO.azulBorde}`,
+                background:LO.azul}}>
+                <div style={{fontSize:9,letterSpacing:3,color:LO.gris,textTransform:"uppercase",marginBottom:4}}>
+                  Antes de calcular
+                </div>
+                <div style={{fontSize:16,fontWeight:700,color:LO.blanco}}>
+                  Marca el personal de manejo y confianza
+                </div>
+                <div style={{fontSize:11,color:LO.textoDim,marginTop:4}}>
+                  Por defecto todos quedan en NA (cálculo normal de recargos y horas extra).
+                </div>
+              </div>
+
+              <div style={{padding:"12px 24px",borderBottom:`1px solid ${LO.azulBorde}`}}>
+                <input value={filtroClas} onChange={e=>setFiltroClas(e.target.value)}
+                  placeholder="Buscar colaborador…" style={inp}/>
+              </div>
+
+              <div style={{overflowY:"auto",padding:"8px 24px",flex:1}}>
+                {visibles.length===0&&(
+                  <div style={{color:LO.textoDim,fontSize:12,padding:"20px 0",textAlign:"center"}}>
+                    Sin coincidencias.
+                  </div>
+                )}
+                {visibles.map(([key,col])=>{
+                  const nkey=normalizarNombre(col.nombre);
+                  const actual=clasEmpleado[nkey]||"NA";
+                  return(
+                    <div key={key} style={{padding:"10px 0",borderBottom:`1px solid rgba(255,255,255,0.06)`,
+                      display:"flex",alignItems:"center",justifyContent:"space-between",gap:12,flexWrap:"wrap"}}>
+                      <div style={{fontSize:13,color:LO.blanco,fontWeight:600,minWidth:180}}>
+                        {col.nombre}
+                      </div>
+                      <div style={{display:"flex",gap:14,flexWrap:"wrap"}}>
+                        {opciones.map(op=>(
+                          <label key={op.val} style={{display:"flex",alignItems:"center",gap:5,
+                            cursor:"pointer",fontSize:11}}>
+                            <input type="radio" name={`clase-${key}`} checked={actual===op.val}
+                              onChange={()=>setClase(nkey,op.val)}
+                              style={{accentColor:LO.magenta}}/>
+                            <span style={{color:actual===op.val?LO.blanco:LO.textoDim}}>
+                              {op.label}
+                            </span>
+                          </label>
+                        ))}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+
+              <div style={{padding:"16px 24px",borderTop:`1px solid ${LO.azulBorde}`,
+                display:"flex",alignItems:"center",justifyContent:"space-between",gap:16}}>
+                <div style={{fontSize:11,color:LO.textoDim}}>
+                  {nMC>0||nMC2D>0
+                    ?`${nMC} de manejo y confianza · ${nMC2D} con excepción 2D`
+                    :"Ningún colaborador marcado como manejo y confianza"}
+                </div>
+                <div style={{display:"flex",gap:10}}>
+                  <button onClick={()=>setShowClasModal(false)} style={{
+                    background:"transparent",border:`1px solid ${LO.azulBorde}`,borderRadius:4,
+                    color:LO.textoSub,fontSize:12,letterSpacing:1,padding:"10px 18px",
+                    cursor:"pointer",fontFamily:"'Nunito Sans',sans-serif"}}>
+                    Cancelar
+                  </button>
+                  <button onClick={confirmarClasificacion} style={{
+                    background:LO.magenta,border:"none",borderRadius:4,color:LO.blanco,
+                    fontSize:12,fontWeight:700,letterSpacing:1.5,textTransform:"uppercase",
+                    padding:"10px 22px",cursor:"pointer",fontFamily:"'Nunito Sans',sans-serif"}}>
+                    Calcular y descargar
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
     </div>
   );
 }
